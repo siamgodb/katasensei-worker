@@ -1,4 +1,15 @@
-fastapi==0.118.0
+# runpod is the one that constrains everything else here: it pins a floor under
+# fastapi that the rest has to clear. Resolve the whole file together after
+# touching any line — a version that installs on a laptop can be impossible on
+# the image, which is where it matters.
+#
+#   pip install --dry-run --python-version 3.10 --only-binary=:all: \
+#     --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 \
+#     --platform manylinux_2_28_x86_64 --platform manylinux_2_34_x86_64 \
+#     --platform any -r requirements.txt
+#
+# Python 3.10 because that is what Ubuntu 22.04 ships, and runpod's own floor.
+fastapi==0.141.1
 uvicorn[standard]==0.37.0
 httpx==0.28.1
 runpod==1.12.0
