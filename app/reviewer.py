@@ -85,6 +85,34 @@ class Reviewer:
 
         return job
 
+    async def run(self, request: ReviewRequest) -> ReviewJob:
+        """Review one game here and now, without the queue.
+
+        What a serverless job needs. RunPod hands a worker one job, waits for
+        the call to return, and is free to shut the worker down the moment it
+        does — so accepting a review and answering "queued" would kill the
+        engine halfway through it. The internal queue exists for the long-lived
+        box; here the platform's queue is the queue.
+        """
+        job = ReviewJob(request=request, total=len(request.moves))
+        self._jobs[request.review_id] = job
+
+        try:
+            await self._run(job)
+        except Exception as exc:  # noqa: BLE001 - reported, then re-raised
+            log.exception("review %s failed", request.review_id)
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = time.monotonic()
+            # Laravel learns from the callback, not from the return value: the
+            # player is watching a progress bar, and the platform's own record
+            # of a failed job is not something the browser can see.
+            await self._deliver(job, [], final=True)
+
+            raise
+
+        return job
+
     def job(self, review_id: str) -> ReviewJob | None:
         return self._jobs.get(review_id)
 

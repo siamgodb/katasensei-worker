@@ -29,10 +29,14 @@ class Settings:
             katago_human_model=os.environ.get("KATAGO_HUMAN_MODEL") or None,
             laravel_url=os.environ.get("LARAVEL_URL", "http://127.0.0.1:8000"),
             callback_secret=os.environ["CALLBACK_SECRET"],
-            api_token=os.environ["API_TOKEN"],
+            # Only the FastAPI entry point uses this, and only for development:
+            # on RunPod the endpoint's own API key is the lock, and there is no
+            # second token to check. Empty means the HTTP face refuses
+            # everything rather than letting everything through.
+            api_token=os.environ.get("API_TOKEN", ""),
             default_visits=int(os.environ.get("DEFAULT_VISITS", "100")),
-            # How long the analysis board may hold the connection. Long enough
-            # for a deep query on a slow CPU box, short enough that a wedged
-            # engine does not tie up a queue worker indefinitely.
+            # How long one position may take. A deep query on a GPU is under a
+            # second, so this is not a budget — it is the point at which a
+            # wedged engine stops holding a billed worker open.
             analysis_timeout_seconds=float(os.environ.get("ANALYSIS_TIMEOUT", "60")),
         )

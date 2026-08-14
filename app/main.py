@@ -1,8 +1,13 @@
-"""The worker's HTTP face.
+"""The worker's HTTP face, for running it without RunPod.
 
-Deliberately small. Laravel asks for a review and gets an acknowledgement; the
-results are pushed back as they are produced rather than polled for, because a
-review takes minutes and holding a connection open for it helps nobody.
+Production is `app.handler` on a RunPod serverless endpoint. This is the same
+engine, reviewer and analyst behind an ordinary HTTP server: what you run on a
+laptop or on a box you own, and what the tests exercise. Both entry points take
+the same request shapes, from `app.schemas`, so the two cannot drift.
+
+Reviews here go through the worker's own queue and answer immediately, because
+this process is expected to outlive the request. On RunPod it cannot, which is
+the one real difference between the two.
 """
 
 from __future__ import annotations
@@ -13,7 +18,6 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from pydantic import BaseModel, Field
 
 from .analysis import AnalysisFailed, Analyst, PositionRequest
 from .callbacks import LaravelCallback
@@ -21,6 +25,7 @@ from .config import Settings
 from .engine import KataGoEngine
 from .query import ReviewRequest
 from .reviewer import Reviewer
+from .schemas import AnalyzeIn, ReviewIn
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -69,51 +74,19 @@ app = FastAPI(title="katasensei-worker", lifespan=lifespan)
 def authorise(authorization: Annotated[str | None, Header()] = None) -> None:
     """A shared bearer token, compared in constant time.
 
-    The worker is meant to sit on a private network with nothing else able to
-    reach it. This is the second lock, not the first.
+    Unset means this face is closed. It is the development entry point and has
+    no equivalent of RunPod's account-level key in front of it, so a missing
+    token has to mean "nobody" rather than "anybody".
     """
     settings: Settings = state["settings"]
+
+    if settings.api_token == "":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "no API_TOKEN is set")
+
     expected = f"Bearer {settings.api_token}"
 
     if authorization is None or not secrets.compare_digest(authorization, expected):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad token")
-
-
-class MoveIn(BaseModel):
-    color: str = Field(pattern="^[BW]$")
-    loc: str
-
-
-class AnalyzeIn(BaseModel):
-    """One position from the analysis board."""
-
-    query_id: str
-    moves: list[MoveIn] = Field(default_factory=list)
-    initial_stones: list[MoveIn] = Field(default_factory=list)
-    board_x_size: int = 19
-    board_y_size: int = 19
-    komi: float = 6.5
-    rules: str = "japanese"
-    # Bounded here as well as in Laravel. This endpoint spends CPU on a shared
-    # box, and the bound is the only thing between a typo and a request that
-    # occupies the engine for an hour.
-    max_visits: int = Field(default=200, ge=10, le=1000)
-    include_ownership: bool = True
-
-
-class ReviewIn(BaseModel):
-    review_id: str
-    moves: list[MoveIn]
-    board_x_size: int = 19
-    board_y_size: int = 19
-    komi: float = 6.5
-    rules: str = "japanese"
-    initial_stones: list[MoveIn] = Field(default_factory=list)
-    max_visits: int = 100
-    student_rank: str | None = None
-    student_color: str = "both"
-    rank_gap: int = 3
-    use_human_model: bool = True
 
 
 @app.get("/healthz")

@@ -1,16 +1,25 @@
-# Two stages: KataGo is a C++ build with a large toolchain, and none of it is
-# needed to run the result.
+# The RunPod serverless image: KataGo on CUDA, behind a handler.
 #
-# USE_BACKEND=EIGEN is the CPU backend. Swap it for CUDA and start from an
-# nvidia/cuda base to get the same image for the GPU pool — nothing else in
-# here changes.
-FROM ubuntu:24.04 AS katago
+# Two stages, because building KataGo needs a C++ toolchain and the CUDA
+# development headers — well over a gigabyte of things that have no business
+# being on a worker that RunPod pulls every time it cold-starts one.
+#
+# 12.4.1 rather than the newest CUDA on purpose: it runs on driver 550 and,
+# through minor-version compatibility, on anything from 525 up. Chasing the
+# latest buys nothing here and puts the image at the mercy of which driver a
+# given RunPod host happens to have.
+ARG CUDA_VERSION=12.4.1
+ARG UBUNTU_VERSION=22.04
 
-ARG USE_BACKEND=EIGEN
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS katago
+
 ARG KATASENSEI_REF=master
+ARG SKIP_RUNTESTS=0
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git libzip-dev zlib1g-dev libeigen3-dev \
+        build-essential cmake git libzip-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 --branch ${KATASENSEI_REF} \
@@ -18,20 +27,30 @@ RUN git clone --depth 1 --branch ${KATASENSEI_REF} \
 
 WORKDIR /src/cpp
 
-# -DUSE_AVX2=1 is worth roughly 1.4-1.6x on any CPU from the last decade, and
-# makes the binary refuse to start on anything older. Every cloud instance
-# worth renting has it.
-RUN cmake . -DUSE_BACKEND=${USE_BACKEND} -DUSE_AVX2=1 -DNO_GIT_REVISION=1 \
+# -DUSE_AVX2=1 is worth roughly 1.4-1.6x on the parts that stay on the CPU, and
+# makes the binary refuse to start on anything older than about 2013. Every
+# machine RunPod rents has it.
+RUN cmake . -DUSE_BACKEND=CUDA -DUSE_AVX2=1 -DNO_GIT_REVISION=1 \
     && make -j"$(nproc)"
 
-# The sensei unit tests need no neural net, so a broken build is caught here
-# rather than on the first review.
-RUN ./katago runtests
+# The sensei unit tests cover the board, the rules and the report invariants;
+# none of it touches the neural net, so it runs on this GPU-less builder and
+# catches a broken build here rather than on somebody's first review.
+#
+# SKIP_RUNTESTS=1 is the escape hatch if a future revision starts initialising
+# the backend during startup — but reach for it only after reading why it
+# failed, because this is the only test that runs against the real binary.
+RUN test "${SKIP_RUNTESTS}" = "1" || ./katago runtests
 
-FROM python:3.12-slim
+# -----------------------------------------------------------------------------
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libzip4 zlib1g \
+        python3 python3-pip libzip4 zlib1g ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=katago /src/cpp/katago /usr/local/bin/katago
@@ -39,20 +58,39 @@ COPY --from=katago /src/cpp/katago /usr/local/bin/katago
 WORKDIR /worker
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
+COPY configs ./configs
 COPY app ./app
 
-# Models are mounted rather than baked in: they are hundreds of megabytes, they
-# change independently of this code, and the tier a box serves is decided by
-# which ones it is given.
+# Models, baked or mounted.
+#
+# Baked is the better default on serverless: RunPod caches an image on the
+# worker, so a net that is part of the image is already local when a cold start
+# begins, while a network volume is a read over the wire at exactly the moment
+# somebody is waiting — and pins the endpoint to one datacentre. Left empty,
+# the image expects /models instead, which is what a network volume or a plain
+# `docker run -v` gives you.
+ARG KATAGO_MODEL_URL=
+ARG KATAGO_HUMAN_MODEL_URL=
+
+RUN mkdir -p /models \
+    && if [ -n "${KATAGO_MODEL_URL}" ]; then \
+        curl -fsSL -o /models/network.bin.gz "${KATAGO_MODEL_URL}"; \
+    fi \
+    && if [ -n "${KATAGO_HUMAN_MODEL_URL}" ]; then \
+        curl -fsSL -o /models/human.bin.gz "${KATAGO_HUMAN_MODEL_URL}"; \
+    fi
+
 ENV KATAGO_BINARY=/usr/local/bin/katago \
     KATAGO_MODEL=/models/network.bin.gz \
-    KATAGO_CONFIG=/models/analysis.cfg
+    KATAGO_CONFIG=/worker/configs/analysis-gpu.cfg
 
-EXPOSE 8100
-
-# One worker process. The engine is a single child holding the neural net in
-# memory, and a second uvicorn worker would either start a second engine or
-# talk to a child it does not own.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8100", "--workers", "1"]
+# The serverless entry point. It starts the engine on the first job and keeps it
+# for the container's life, which is the whole reason a warm worker answers the
+# analysis board in the time the search takes rather than in the time a neural
+# net takes to load.
+#
+# For a box you own rather than rent by the second, the same code has an HTTP
+# face: uvicorn app.main:app --host 0.0.0.0 --port 8100
+CMD ["python3", "-u", "-m", "app.handler"]
