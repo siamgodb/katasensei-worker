@@ -73,17 +73,28 @@ second and a spinner that means fifty are otherwise the same spinner.
 
 ## Endpoint settings
 
+Defaults in brackets. The two that matter most are both defaults you have to
+change.
+
 | Setting | Value | Why |
 |---|---|---|
-| Max workers | 3 | One is enough for the load; the rest are so a long review does not sit in front of somebody's analysis board. |
-| Idle timeout | 300s | Long enough that a play session pays one cold start. |
-| Execution timeout | 900s | Above the slowest plausible review, below "a wedged engine bills all night". |
-| FlashBoot | on | Cuts the cold start when the endpoint has had recent traffic. |
+| Idle timeout | **300s** [5s] | The important one. At the default a worker is gone five seconds after answering, so a player clicking through a game pays a cold start *per position*. At 300s they pay one for the session. |
+| Scaling type | **Request count, scaler 1** [queue delay 4s] | The other important one. Queue delay waits four seconds before it will even decide to start a worker, and those four seconds land on top of the cold start, on the one request that was already the slowest. |
+| Max workers | 3 [3] | One carries the load; the rest are so a long review does not sit in front of somebody's analysis board. |
+| Active workers | 0 [0] | Always-on workers are billed around the clock, which is the thing this whole arrangement exists to avoid. |
+| Execution timeout | 900s [600s] | Above the slowest plausible review, below "a wedged engine bills all night". Cold start is not counted in it. |
+| FlashBoot | on [on] | Cuts the cold start when the endpoint has had recent traffic. |
 | GPU | 24GB class (4090 / L4 / A5000) | The human-rank net is 18 blocks. |
+| CUDA version | 12.4 and up | Must include what the image was built against. |
 
 One endpoint serves both reviews and the analysis board. A second one would
 double the number of workers going cold and halve the chance a player's first
 request finds one already awake.
+
+**An endpoint nobody uses is turned off.** RunPod drops max workers to 2 after
+three days without a request and to **0 after seven**, at which point jobs queue
+and never run. A quiet week is entirely plausible here, so either check the
+endpoint after a quiet spell or keep something touching it.
 
 ## Building it
 
@@ -103,12 +114,18 @@ moment somebody is waiting — and pins the endpoint to one datacentre.
 
 ```bash
 docker build -t katasensei-worker \
-  --build-arg KATAGO_MODEL_URL=https://.../kata1-b18c384nbt.bin.gz \
-  --build-arg KATAGO_HUMAN_MODEL_URL=https://.../b18c384nbt-humanv0.bin.gz .
+  --build-arg KATAGO_MODEL_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz \
+  --build-arg KATAGO_HUMAN_MODEL_URL=https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz .
 ```
 
 Leave both out and the image expects `/models` instead — a network volume, or
 `-v` on a machine you own.
+
+Newer and stronger nets exist — the run is up to `b40c768nbt` — but b18 is the
+better trade here. It is roughly a third of the work per position, this serves
+an interactive board as well as reviews, and every second of it is billed. It
+also matches the human net's architecture, which is the thing being compared
+against.
 
 For development without Docker:
 
@@ -153,7 +170,7 @@ point. Laravel refuses anything more than five minutes out of step.
 |---|---|---|
 | `kata1-b18c384nbt-*.bin.gz` | 18-block net | The main net. Worth running now that a GPU is doing the work. |
 | `kata1-b15c192-*.bin.gz` | 15-block net | Lighter, if the card is small. |
-| `b18c384nbt-humanv0.bin.gz` | Human-rank net | The "what would a 5 kyu play here" comparison. |
+| `b18c384nbt-humanv0.bin.gz` | Human-rank net | The "what would a 5 kyu play here" comparison. From the KataGo v1.15.0 release, not katagotraining. |
 | `configs/analysis-gpu.cfg` | Engine config | In this repo. Diff it against `cpp/configs/analysis_example.cfg` in the version you build. |
 
 The human net was the single most expensive thing in a CPU review, and it is why
