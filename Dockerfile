@@ -50,15 +50,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip libzip4 zlib1g ca-certificates curl \
+        python3 python3-venv libzip4 zlib1g ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=katago /src/cpp/katago /usr/local/bin/katago
 
 WORKDIR /worker
 
+# A virtualenv rather than the system Python.
+#
+# Two reasons, both about not depending on which Ubuntu this base happens to
+# be. Newer ones mark the system Python externally-managed and refuse the
+# install outright; older ones ship a pip too old to know the flag that would
+# override that. A venv is simply outside the argument.
+#
+# And upgrading pip inside it first, because the one 22.04 packages is from
+# 2022 and chokes on the metadata modern wheels are published with.
+ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
+RUN python3 -m venv "$VIRTUAL_ENV"
+
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY configs ./configs
 COPY app ./app
