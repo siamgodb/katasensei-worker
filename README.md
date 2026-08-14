@@ -96,6 +96,27 @@ three days without a request and to **0 after seven**, at which point jobs queue
 and never run. A quiet week is entirely plausible here, so either check the
 endpoint after a quiet spell or keep something touching it.
 
+## This directory is also its own repository
+
+RunPod builds from a git repo, and it builds from the repo's root — so the
+worker needs to be at a root somewhere. It lives here, in siamgoplay, because
+that is where it is edited and where its tests run alongside everything else;
+it is published to a repo of its own with `git subtree`.
+
+```bash
+git subtree push --prefix=katasensei-worker worker main
+```
+
+That splits this directory into commits whose paths start at `Dockerfile`
+rather than at `katasensei-worker/`, and pushes them. The remote is added once:
+
+```bash
+git remote add worker git@github.com:ORG/katasensei-worker.git
+```
+
+**Edit here, never there.** A commit made directly on the published repo is one
+`subtree push` away from being overwritten, and nothing will warn you.
+
 ## Building it
 
 ```bash
