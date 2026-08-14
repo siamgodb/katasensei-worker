@@ -68,11 +68,19 @@ COPY app ./app
 # Baked is the better default on serverless: RunPod caches an image on the
 # worker, so a net that is part of the image is already local when a cold start
 # begins, while a network volume is a read over the wire at exactly the moment
-# somebody is waiting — and pins the endpoint to one datacentre. Left empty,
-# the image expects /models instead, which is what a network volume or a plain
-# `docker run -v` gives you.
-ARG KATAGO_MODEL_URL=
-ARG KATAGO_HUMAN_MODEL_URL=
+# somebody is waiting — and pins the endpoint to one datacentre.
+#
+# Real URLs as defaults rather than blanks, so `docker build .` with no
+# arguments produces a working image. That matters more than it looks: RunPod
+# can build this straight from the git repo, and a build it starts itself has
+# nowhere to put a --build-arg. Override them to pin a different net; set
+# either to empty to leave /models to a volume or a `docker run -v`.
+#
+# b18 rather than the strongest net on the training run (b40c768nbt) because
+# this serves an interactive board as well as reviews, every second is billed,
+# and it is the architecture the human-rank net is comparing against.
+ARG KATAGO_MODEL_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz
+ARG KATAGO_HUMAN_MODEL_URL=https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz
 
 RUN mkdir -p /models \
     && if [ -n "${KATAGO_MODEL_URL}" ]; then \
@@ -84,6 +92,7 @@ RUN mkdir -p /models \
 
 ENV KATAGO_BINARY=/usr/local/bin/katago \
     KATAGO_MODEL=/models/network.bin.gz \
+    KATAGO_HUMAN_MODEL=/models/human.bin.gz \
     KATAGO_CONFIG=/worker/configs/analysis-gpu.cfg
 
 # The serverless entry point. It starts the engine on the first job and keeps it

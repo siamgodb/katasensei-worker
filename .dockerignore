@@ -1,0 +1,14 @@
+# The build needs app/, configs/ and requirements.txt. Everything else here is
+# either rebuilt inside the image or has no business in it.
+#
+# .venv especially: it is a local virtualenv with macOS binaries in it, and
+# sending it would make the build context hundreds of megabytes of things the
+# image would ignore.
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+requirements-dev.txt
+pytest.ini
+README.md
