@@ -15,6 +15,7 @@ from typing import Annotated, Any, AsyncIterator
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
+from .analysis import AnalysisFailed, Analyst, PositionRequest
 from .callbacks import LaravelCallback
 from .config import Settings
 from .engine import KataGoEngine
@@ -40,11 +41,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     callback = LaravelCallback(settings.laravel_url, settings.callback_secret)
     reviewer = Reviewer(engine, callback.send_batch)
+    analyst = Analyst(engine, timeout=settings.analysis_timeout_seconds)
 
     await engine.start()
     await reviewer.start()
 
-    state.update(settings=settings, engine=engine, reviewer=reviewer, callback=callback)
+    state.update(
+        settings=settings,
+        engine=engine,
+        reviewer=reviewer,
+        callback=callback,
+        analyst=analyst,
+    )
 
     try:
         yield
@@ -74,6 +82,23 @@ def authorise(authorization: Annotated[str | None, Header()] = None) -> None:
 class MoveIn(BaseModel):
     color: str = Field(pattern="^[BW]$")
     loc: str
+
+
+class AnalyzeIn(BaseModel):
+    """One position from the analysis board."""
+
+    query_id: str
+    moves: list[MoveIn] = Field(default_factory=list)
+    initial_stones: list[MoveIn] = Field(default_factory=list)
+    board_x_size: int = 19
+    board_y_size: int = 19
+    komi: float = 6.5
+    rules: str = "japanese"
+    # Bounded here as well as in Laravel. This endpoint spends CPU on a shared
+    # box, and the bound is the only thing between a typo and a request that
+    # occupies the engine for an hour.
+    max_visits: int = Field(default=200, ge=10, le=1000)
+    include_ownership: bool = True
 
 
 class ReviewIn(BaseModel):
@@ -151,3 +176,37 @@ async def review_status(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such review")
 
     return job.snapshot()
+
+
+@app.post("/v1/analyze")
+async def analyze(
+    body: AnalyzeIn,
+    _: Annotated[None, Depends(authorise)],
+) -> dict[str, Any]:
+    """Answer a single position, synchronously.
+
+    The caller is a queued Laravel job with a person waiting behind it, so the
+    connection is held open rather than answered with a callback: the whole
+    thing is seconds, and a callback for something this short is two more
+    moving parts to get wrong.
+    """
+    analyst: Analyst = state["analyst"]
+
+    try:
+        return await analyst.analyse(
+            PositionRequest(
+                query_id=body.query_id,
+                moves=[(m.color, m.loc) for m in body.moves],
+                board_x_size=body.board_x_size,
+                board_y_size=body.board_y_size,
+                komi=body.komi,
+                rules=body.rules,
+                max_visits=body.max_visits,
+                initial_stones=[(s.color, s.loc) for s in body.initial_stones] or None,
+                include_ownership=body.include_ownership,
+            )
+        )
+    except AnalysisFailed as exc:
+        # 503 rather than 500: the engine is busy or wedged, and the caller
+        # should try again rather than treat the position as unanalysable.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc

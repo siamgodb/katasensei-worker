@@ -109,9 +109,23 @@ which exercises the sensei invariants and needs no neural net at all.
 | `GET /healthz` | Whether the engine is up and how deep the queue is. |
 | `POST /v1/review` | Start a review. Returns immediately; results are pushed back. |
 | `GET /v1/review/{id}` | Progress, for the rare case Laravel needs to ask. |
+| `POST /v1/analyze` | One position, answered on the same connection. |
 
 Everything but `/healthz` needs `Authorization: Bearer $API_TOKEN`. Result
 batches are signed with `CALLBACK_SECRET` over the exact request body.
 
 `POST /v1/review` is idempotent on `review_id`: a retry gets the existing job
 rather than starting a second review of the same game.
+
+`POST /v1/analyze` is the analysis board, and is the one endpoint that answers
+synchronously — somebody is watching the screen, and a callback for something
+that takes seconds is two more moving parts to get wrong. It skips the review
+queue and goes straight to the engine, which parallelises across its own
+analysis threads: a review running at the time finishes slightly later, and the
+board gets an answer in seconds rather than in eight minutes. `ANALYSIS_TIMEOUT`
+(default 60s) bounds how long the connection is held.
+
+Winrate and score come back from **Black's** point of view, converted once in
+`summarise()`. KataGo reports them for whoever is to move, which is right for an
+engine and wrong for a graph a person reads — the bar would jump to the other
+side of the screen on every move while nothing had changed.

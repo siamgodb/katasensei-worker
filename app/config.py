@@ -16,6 +16,7 @@ class Settings:
     callback_secret: str
     api_token: str
     default_visits: int
+    analysis_timeout_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -30,4 +31,8 @@ class Settings:
             callback_secret=os.environ["CALLBACK_SECRET"],
             api_token=os.environ["API_TOKEN"],
             default_visits=int(os.environ.get("DEFAULT_VISITS", "100")),
+            # How long the analysis board may hold the connection. Long enough
+            # for a deep query on a slow CPU box, short enough that a wedged
+            # engine does not tie up a queue worker indefinitely.
+            analysis_timeout_seconds=float(os.environ.get("ANALYSIS_TIMEOUT", "60")),
         )
