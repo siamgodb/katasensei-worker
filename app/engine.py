@@ -17,11 +17,22 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+from collections import deque
 from typing import Any, Callable
 
 from .protocol import EngineError, ProtocolError, Response, parse_line
 
 log = logging.getLogger(__name__)
+
+STDERR_TAIL_LINES = 60
+"""How much of KataGo's own complaining to keep.
+
+It writes its configuration and per-search timings here, which is noise until
+the moment it refuses to start — and then it is the only account of why. On a
+serverless worker there is no shell to go and reproduce it in, so whatever is
+not kept here is gone.
+"""
 
 Listener = Callable[[Response], bool]
 """Takes a response; returns whether it belonged to the listener."""
@@ -53,6 +64,11 @@ class KataGoEngine:
         self._listeners: list[Listener] = []
         self._write_lock = asyncio.Lock()
         self._ready = asyncio.Event()
+        self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+        self._died = asyncio.Event()
+        self._stderr_level = (
+            logging.INFO if os.environ.get("KATAGO_LOG_STDERR") == "1" else logging.DEBUG
+        )
 
     @property
     def is_running(self) -> bool:
@@ -79,6 +95,9 @@ class KataGoEngine:
 
         argv = self.command()
         log.info("starting engine: %s", " ".join(argv))
+
+        self._stderr_tail.clear()
+        self._died.clear()
 
         self._process = await asyncio.create_subprocess_exec(
             *argv,
@@ -154,6 +173,10 @@ class KataGoEngine:
         # line, not worth an exception.
         log.debug("unclaimed response: %r", response)
 
+    def stderr_tail(self) -> str:
+        """The last thing KataGo said before it stopped saying anything."""
+        return "\n".join(self._stderr_tail) or "(it wrote nothing to stderr)"
+
     async def _await_ready(self) -> None:
         probe = {"id": "__ready__", "action": "query_version"}
 
@@ -167,12 +190,41 @@ class KataGoEngine:
 
         self.add_listener(listener)
 
+        ready = asyncio.ensure_future(self._ready.wait())
+        died = asyncio.ensure_future(self._died.wait())
+
         try:
-            await self.send(probe)
-            await asyncio.wait_for(self._ready.wait(), timeout=180)
-        except asyncio.TimeoutError as exc:  # pragma: no cover - slow or broken host
-            raise EngineNotRunning("the analysis engine did not become ready") from exc
+            # A process that has already exited makes this fail, and the
+            # reason it exited is worth far more than "could not write to it" —
+            # so the failure is swallowed and the wait below reports instead.
+            with contextlib.suppress(Exception):
+                await self.send(probe)
+
+            # Whichever happens first. Waiting only for readiness would sit out
+            # the full timeout after a process that has already exited, which
+            # is the most common way this fails and the least useful way to
+            # learn about it.
+            done, _ = await asyncio.wait(
+                {ready, died},
+                timeout=180,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if ready in done:
+                return
+
+            raise EngineNotRunning(
+                f"the analysis engine exited before it was ready "
+                f"(code {self._process.returncode if self._process else '?'}). "
+                f"Its last words:\n{self.stderr_tail()}"
+                if died in done
+                else f"the analysis engine did not become ready within 180s. "
+                f"Its last words:\n{self.stderr_tail()}"
+            )
         finally:
+            for task in (ready, died):
+                task.cancel()
+
             self.remove_listener(listener)
 
     async def _read_stdout(self) -> None:
@@ -182,7 +234,14 @@ class KataGoEngine:
             raw = await self._process.stdout.readline()
 
             if not raw:
-                log.error("engine stdout closed")
+                # The engine is gone. This line used to be the whole account of
+                # it, which told you nothing you could act on — KataGo explains
+                # itself on stderr, so that is what gets printed.
+                self._died.set()
+                log.error(
+                    "engine stdout closed; katago said:\n%s",
+                    self.stderr_tail(),
+                )
                 break
 
             try:
@@ -220,6 +279,12 @@ class KataGoEngine:
             if not raw:
                 break
 
-            # KataGo logs its configuration and per-search timings here. Useful
-            # when a review is unexpectedly slow, noisy otherwise.
-            log.debug("katago: %s", raw.decode(errors="replace").rstrip())
+            line = raw.decode(errors="replace").rstrip()
+
+            # Kept whether or not anybody is listening, because the moment it
+            # matters is the moment the process is already gone.
+            self._stderr_tail.append(line)
+
+            # KataGo logs its configuration and per-search timings here. Noise
+            # during a normal run; set KATAGO_LOG_STDERR=1 to watch it live.
+            log.log(self._stderr_level, "katago: %s", line)
