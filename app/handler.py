@@ -26,8 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+import httpx
 
 from .analysis import Analyst, PositionRequest
 from .callbacks import LaravelCallback
@@ -36,6 +40,7 @@ from .engine import KataGoEngine
 from .query import ReviewRequest
 from .reviewer import Reviewer
 from .schemas import AnalyzeIn, ReviewIn
+from .version import VERSION, fingerprint
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -102,15 +107,24 @@ async def runtime() -> Runtime:
     return _runtime
 
 
+KINDS = {"review", "analyze", "ping"}
+
+
 async def handler(job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job.get("input") or {})
     kind = str(payload.pop("kind", "")).lower()
 
-    if kind not in {"review", "analyze"}:
+    if kind not in KINDS:
         # Raised rather than returned: RunPod records a raised handler as a
         # failed job, which is what the reconciler on the Laravel side reads to
         # decide a review is never coming.
-        raise ValueError(f"unknown kind {kind!r}, expected 'review' or 'analyze'")
+        raise ValueError(f"unknown kind {kind!r}, expected one of {sorted(KINDS)}")
+
+    # Before the engine, and without it. The point of a ping is to be answerable
+    # by a worker whose configuration is wrong, since that is the case worth
+    # asking about.
+    if kind == "ping":
+        return await ping(warm=bool(payload.get("warm")))
 
     current = await runtime()
 
@@ -118,6 +132,111 @@ async def handler(job: dict[str, Any]) -> dict[str, Any]:
         return await analyse(current, AnalyzeIn.model_validate(payload))
 
     return await review(current, ReviewIn.model_validate(payload))
+
+
+WATCHED_ENV = (
+    "KATAGO_BINARY",
+    "KATAGO_MODEL",
+    "KATAGO_HUMAN_MODEL",
+    "KATAGO_CONFIG",
+    "LARAVEL_URL",
+    "CALLBACK_SECRET",
+    "DEFAULT_VISITS",
+    "ANALYSIS_TIMEOUT",
+    "KATAGO_LOG_STDERR",
+)
+
+
+async def ping(*, warm: bool = False) -> dict[str, Any]:
+    """Everything worth knowing about this worker, for the price of a cold start.
+
+    Every silent failure this endpoint has had was a configuration one: a build
+    that did not land, a model path that was not there, a `LARAVEL_URL` still
+    pointing at localhost so a finished review had nowhere to go. Each was found
+    by running a real job and reading the wreckage, which is minutes of a rented
+    card to learn something a container can report in a second.
+
+    Set `warm` to load the neural net as well. That costs what a cold start
+    costs and is worth it before a review — a card that cannot load the net
+    should say so before a player is told their game is being looked at.
+    """
+    laravel_url = os.environ.get("LARAVEL_URL", "")
+
+    report: dict[str, Any] = {
+        "version": VERSION,
+        # Compare with `python -m app.version` locally. If they differ, the
+        # image predates the code, and nothing else in this report matters yet.
+        "fingerprint": fingerprint(),
+        "warm": _runtime is not None and _runtime.engine.is_running,
+        # Names and whether they are set, never values: this comes back through
+        # RunPod's API and into logs, and one of them is the callback secret.
+        "env": {name: bool(os.environ.get(name)) for name in WATCHED_ENV},
+        "files": {
+            "binary": _file(os.environ.get("KATAGO_BINARY", "katago")),
+            "model": _file(os.environ.get("KATAGO_MODEL")),
+            "human_model": _file(os.environ.get("KATAGO_HUMAN_MODEL")),
+            "config": _file(os.environ.get("KATAGO_CONFIG")),
+        },
+        "gpu": _gpu(),
+        # A review delivers its results by calling Laravel back. If that call
+        # cannot be made, the whole review is GPU time spent on an answer that
+        # goes in the bin — and the worker only finds out at the end.
+        "laravel": await _reachable(laravel_url),
+    }
+
+    if warm:
+        try:
+            current = await runtime()
+            report["warm"] = current.engine.is_running
+        except Exception as exc:  # noqa: BLE001 - the answer, not a failure
+            report["warm"] = False
+            report["engine_error"] = str(exc)
+
+    return report
+
+
+def _file(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {"set": False}
+
+    resolved = Path(path)
+
+    # Size as well as existence: a model truncated by a build that ran out of
+    # disk is a file that exists and an engine that will not start.
+    if not resolved.exists():
+        return {"set": True, "path": path, "exists": False}
+
+    return {"set": True, "path": path, "exists": True, "bytes": resolved.stat().st_size}
+
+
+def _gpu() -> dict[str, Any]:
+    """Whether there is a card here at all, without importing a CUDA runtime."""
+    driver = Path("/proc/driver/nvidia/version")
+
+    if not driver.exists():
+        return {"present": False}
+
+    return {"present": True, "driver": driver.read_text().splitlines()[0].strip()}
+
+
+async def _reachable(url: str) -> dict[str, Any]:
+    if not url:
+        return {"configured": False}
+
+    # Localhost on a serverless worker is the worker. Named rather than left to
+    # show up as a connection error, because it is the mistake that looks most
+    # like a working configuration in the endpoint's settings page.
+    local = any(host in url for host in ("127.0.0.1", "localhost", "0.0.0.0"))
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, follow_redirects=True)
+
+        # Any answer at all is the thing being tested. A 404 from the right
+        # server is a pass; the callback goes to a different path anyway.
+        return {"configured": True, "url": url, "local": local, "status": response.status_code}
+    except Exception as exc:  # noqa: BLE001 - reported rather than raised
+        return {"configured": True, "url": url, "local": local, "error": str(exc)}
 
 
 async def analyse(current: Runtime, body: AnalyzeIn) -> dict[str, Any]:

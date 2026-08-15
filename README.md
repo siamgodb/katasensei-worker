@@ -214,6 +214,47 @@ you hold a page open for, and the cold start alone can exceed the search.
 Reviews still run one at a time per worker. The engine already parallelises
 across its analysis threads, and RunPod hands a worker one job anyway.
 
+## Check the endpoint before you spend a search on it
+
+```bash
+php artisan siamgo:katago-ping        # from the siamgoplay checkout
+```
+
+RunPod builds this image from a git push, and its console shows you a build
+rather than the code inside one. So a job failing on a bug you fixed and pushed
+an hour ago looks exactly like a job failing on a bug that is still there —
+which is a question that has been answered here the expensive way more than
+once, by firing a real job at a rented card and reading the traceback.
+
+`kind: "ping"` answers it for the price of a container start. It reports:
+
+- **a fingerprint** — a hash of `app/*.py` and `configs/*.cfg`, computed inside
+  the image. `WorkerFingerprint` computes the same hash from your checkout and
+  the command compares them. Different strings mean the build did not land,
+  whatever the console says. (A finished build is not a deployed one — the
+  endpoint has to be released onto it.)
+- **whether the models are where the environment says**, and how big they are.
+  A net truncated by a build that ran out of disk is a file that exists and an
+  engine that will not start.
+- **whether the worker can reach Laravel at all.** `LARAVEL_URL` defaults to
+  localhost, which reads as entirely correct on the settings page and means a
+  finished review is delivered to the container that just produced it. That is
+  minutes of a rented card, thrown away, recorded as a success.
+- **whether there is a GPU visible.**
+
+It never reports the *value* of an environment variable — the report travels
+back through RunPod's API and one of those variables is the callback secret.
+
+`--warm` loads the neural net as well, so a card that cannot take it says so
+before a player is told their game is being looked at. That costs what a cold
+start costs.
+
+The engine's own half of the same question, on a `docker run` or a box you own:
+
+```bash
+python -m app.version    # prints the fingerprint this source produces
+```
+
 ## Sanity checks on a new endpoint
 
 `docs/TeachingReport.md` in katasensei names four, and they are worth running on
@@ -248,6 +289,23 @@ One endpoint, so `kind` says which of the two it is.
 {"input": {"kind": "review", "review_id": "01J...", "moves": [["B", "Q16"]],
            "max_visits": 600, "student_rank": "5k", "use_human_model": true}}
 ```
+
+```json
+{"input": {"kind": "ping"}}
+```
+
+A move may be written either as the pair above, which is KataGo's own wire
+format, or as `{"color": "B", "loc": "Q16"}`, which is what siamgoplay sends.
+Accepting only one of them is how reviews spent the whole of Phase 2 being
+rejected by a worker whose test suite was green: each side tested itself against
+itself, and the first thing to notice was a rented GPU. `tests/test_contract.py`
+and `tests/Feature/Katago/PayloadContractTest.php` now parse the same fixtures
+from both directions, so a shape change on either side fails the other side's
+suite.
+
+A review's cost is very nearly `len(moves) × max_visits`, so both are bounded in
+`ReviewIn` — a spending limit rather than input hygiene. The ceilings sit above
+what the most expensive plan asks for.
 
 `analyze` is answered in the job's output. `review` returns a snapshot, and the
 reports themselves arrive at

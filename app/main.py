@@ -100,6 +100,25 @@ async def healthz() -> dict[str, Any]:
     }
 
 
+@app.post("/v1/ping")
+async def ping(_: Annotated[None, Depends(authorise)]) -> dict[str, Any]:
+    """The same self-report the RunPod handler gives, so one command reads both.
+
+    Less urgent here — a box you own has a shell you can open — but a diagnostic
+    that only exists on the entry point you cannot inspect is one nobody has
+    ever seen working.
+    """
+    from .handler import ping as describe
+
+    report = await describe()
+    # Unlike a serverless worker, this process starts the engine at boot and
+    # holds it, so what `_runtime` says about the handler's engine is not what
+    # is running here.
+    report["warm"] = state["engine"].is_running
+
+    return report
+
+
 @app.post("/v1/review", status_code=status.HTTP_202_ACCEPTED)
 async def start_review(
     body: ReviewIn,

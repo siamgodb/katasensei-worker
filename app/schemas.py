@@ -76,14 +76,25 @@ class AnalyzeIn(BaseModel):
 
 
 class ReviewIn(BaseModel):
+    """A whole game, to be walked move by move.
+
+    The bounds are a spending limit, not input hygiene. This is the one request
+    that can occupy a rented card for minutes at a time, and its cost is very
+    nearly `len(moves) * max_visits` — so an unbounded pair of numbers here is
+    an unbounded bill, reachable by one wrong migration on the Laravel side. The
+    ceilings are set above what the most expensive plan asks for (600 visits, and
+    a 19x19 game that runs long), so nothing legitimate meets them.
+    """
+
     review_id: str
-    moves: list[MoveIn]
+    moves: list[MoveIn] = Field(max_length=1000)
     board_x_size: int = 19
     board_y_size: int = 19
     komi: float = 6.5
     rules: str = "japanese"
     initial_stones: list[MoveIn] = Field(default_factory=list)
-    max_visits: int = 100
+    # Zero means "whatever this worker's default is", which the handler applies.
+    max_visits: int = Field(default=100, ge=0, le=4000)
     student_rank: str | None = None
     student_color: str = "both"
     rank_gap: int = 3

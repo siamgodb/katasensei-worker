@@ -27,6 +27,15 @@ log = logging.getLogger(__name__)
 BATCH_SIZE = 20
 BATCH_INTERVAL_SECONDS = 15.0
 
+FINAL_DELIVERY_ATTEMPTS = 3
+"""How hard to try on the batch that says the review is finished."""
+
+RETRY_BACKOFF_SECONDS = 1.0
+"""Doubled per attempt. A named constant so tests can set it to nothing."""
+
+POLL_INTERVAL_SECONDS = 1.0
+"""How often the review loop wakes to flush and to check the engine is alive."""
+
 Sink = Callable[[str, list[dict[str, Any]], dict[str, Any]], Awaitable[None]]
 """Called with (review_id, reports, progress) to deliver a batch."""
 
@@ -106,8 +115,10 @@ class Reviewer:
             job.finished_at = time.monotonic()
             # Laravel learns from the callback, not from the return value: the
             # player is watching a progress bar, and the platform's own record
-            # of a failed job is not something the browser can see.
-            await self._deliver(job, [], final=True)
+            # of a failed job is not something the browser can see. Worth
+            # insisting on for the same reason the final batch is — this one
+            # is what gives the player their allowance back.
+            await self._deliver_insistently(job, [], final=True)
 
             raise
 
@@ -159,6 +170,18 @@ class Reviewer:
 
             return True
 
+        # Before the engine is asked for anything.
+        #
+        # A review is delivered by calling Laravel back, so a review whose
+        # callback cannot be made is minutes of a rented card spent producing an
+        # answer with nowhere to go — and the old order of things only found
+        # that out at the end, after paying for all of it. One empty batch up
+        # front costs a round trip and turns that into an immediate failure.
+        if not await self._deliver(job, []):
+            raise RuntimeError(
+                "could not reach Laravel to deliver this review, so it was not started"
+            )
+
         self._engine.add_listener(listener)
 
         try:
@@ -168,7 +191,7 @@ class Reviewer:
 
             while not complete.is_set():
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(complete.wait(), timeout=1.0)
+                    await asyncio.wait_for(complete.wait(), timeout=POLL_INTERVAL_SECONDS)
 
                 new = self._drain(tracker, job, pending)
                 now = time.monotonic()
@@ -178,8 +201,14 @@ class Reviewer:
                 )
 
                 if should_flush:
-                    await self._deliver(job, pending)
-                    pending.clear()
+                    # Only on success. Clearing regardless is what the comment
+                    # below `_deliver` claimed was safe and was not: a batch
+                    # that failed to send was dropped here and never resent, so
+                    # a review could finish with a fifth of its moves missing,
+                    # no error anywhere, and the search paid for in full.
+                    if await self._deliver(job, pending):
+                        pending.clear()
+
                     last_flush = now
 
                 if new == 0 and not self._engine.is_running:
@@ -193,7 +222,13 @@ class Reviewer:
             job.status = "finished"
             job.finished_at = time.monotonic()
 
-            await self._deliver(job, pending, final=True)
+            # The one delivery worth retrying. It carries every report that has
+            # not landed yet plus the flag that marks the review finished, and
+            # by now the search has already been paid for — so a few seconds
+            # spent on a second attempt is the cheapest thing in the whole job,
+            # and losing it means the reconciler refunds a review that was in
+            # fact completed.
+            await self._deliver_insistently(job, pending, final=True)
             pending.clear()
         finally:
             self._engine.remove_listener(listener)
@@ -219,20 +254,48 @@ class Reviewer:
 
         return added
 
+    async def _deliver_insistently(
+        self,
+        job: ReviewJob,
+        reports: list[dict[str, Any]],
+        *,
+        final: bool = False,
+        attempts: int = FINAL_DELIVERY_ATTEMPTS,
+    ) -> bool:
+        for attempt in range(attempts):
+            if await self._deliver(job, reports, final=final):
+                return True
+
+            if attempt + 1 < attempts:
+                # A deploy restarting, or a moment of packet loss. Long enough
+                # to outlast one and short enough that a worker is not held open
+                # waiting on a server that is simply gone.
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS * 2 ** attempt)
+
+        return False
+
     async def _deliver(
         self,
         job: ReviewJob,
         reports: list[dict[str, Any]],
         *,
         final: bool = False,
-    ) -> None:
+    ) -> bool:
+        """Send one batch. Returns whether Laravel took it.
+
+        The caller keeps anything that did not land and sends it again with the
+        next batch, so a callback that fails costs a retry rather than the moves
+        it was carrying. Laravel upserts on `(review_id, move_number)`, which is
+        what makes resending safe.
+        """
         progress = job.snapshot()
         progress["final"] = final
 
         try:
             await self._sink(job.request.review_id, list(reports), progress)
         except Exception:  # noqa: BLE001 - a failed callback must not lose the review
-            # The reports are still in job.reports, and the final delivery
-            # resends everything that has not been acknowledged. Losing a batch
-            # costs a retry, not the whole game.
             log.exception("could not deliver a batch for review %s", job.request.review_id)
+
+            return False
+
+        return True
