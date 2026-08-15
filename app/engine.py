@@ -244,6 +244,20 @@ class KataGoEngine:
                 )
                 break
 
+            # Before anything else looks at it.
+            #
+            # The reply to the readiness probe is a version string, which is
+            # not a shape this protocol models — so parse_line returns None for
+            # it, and the None guard below used to swallow the single message
+            # start() spends three minutes waiting for. The check was already
+            # here, sitting just after the line that made it unreachable.
+            #
+            # Only until it arrives: after that this is one wasted JSON parse
+            # per line of a very chatty stream.
+            if not self._ready.is_set() and self._probe_reply(raw):
+                self._ready.set()
+                continue
+
             try:
                 response = parse_line(raw.decode(errors="replace"))
             except ProtocolError:
@@ -251,12 +265,6 @@ class KataGoEngine:
                 continue
 
             if response is None:
-                continue
-
-            # A version reply is not an error, but it is also not a response
-            # shape this protocol models; treat it as the readiness signal.
-            if self._probe_reply(raw):
-                self._ready.set()
                 continue
 
             self.dispatch(response)

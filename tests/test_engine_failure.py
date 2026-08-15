@@ -26,6 +26,56 @@ class ScriptedEngine(KataGoEngine):
         return ["/bin/sh", "-c", self._script]
 
 
+class TestTheReadinessHandshake:
+    """The one exchange that had never been run against a real engine.
+
+    KataGo answers the probe with a version string. Nothing in this protocol
+    models that shape, so `parse_line` returns None for it — and the guard that
+    drops None used to sit in front of the check that recognises it, which made
+    every start wait out the full timeout on an engine that had been ready for
+    three minutes. Every other test used a fake engine and never sent a line
+    down a real pipe.
+    """
+
+    async def test_a_version_reply_means_ready(self) -> None:
+        katago = ScriptedEngine(
+            'read -r line; echo \'{"id":"__ready__","version":"1.17.2"}\'; exec sleep 30'
+        )
+
+        await katago.start()
+
+        assert katago.is_running
+
+        await katago.stop()
+
+    async def test_an_error_reply_also_means_ready(self) -> None:
+        """A version of KataGo that does not know the action still proves it is
+        listening, which is the only thing being asked."""
+        katago = ScriptedEngine(
+            'read -r line; echo \'{"id":"__ready__","error":"unknown action"}\'; exec sleep 30'
+        )
+
+        await katago.start()
+
+        assert katago.is_running
+
+        await katago.stop()
+
+    async def test_the_probe_reply_is_not_offered_to_listeners(self) -> None:
+        seen: list = []
+
+        katago = ScriptedEngine(
+            'read -r line; echo \'{"id":"__ready__","version":"1.17.2"}\'; exec sleep 30'
+        )
+        katago.add_listener(lambda response: bool(seen.append(response)) or True)
+
+        await katago.start()
+
+        assert seen == []
+
+        await katago.stop()
+
+
 class TestAnEngineThatRefusesToStart:
     async def test_it_reports_what_katago_said(self) -> None:
         """The whole point of keeping the tail.
