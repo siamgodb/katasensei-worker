@@ -78,7 +78,7 @@ change.
 
 | Setting | Value | Why |
 |---|---|---|
-| Idle timeout | **300s** [5s] | The important one. At the default a worker is gone five seconds after answering, so a player clicking through a game pays a cold start *per position*. At 300s they pay one for the session. |
+| Idle timeout | **300s** [5s] | The important one, and measured: a warm worker answers in 0.03s and a cold one in 26–30s, with nothing in between. At the default a worker is gone five seconds after answering, so a player clicking through a game pays a cold start *per position*. At 300s they pay one for the session. |
 | Scaling type | **Request count, scaler 1** [queue delay 4s] | The other important one. Queue delay waits four seconds before it will even decide to start a worker, and those four seconds land on top of the cold start, on the one request that was already the slowest. |
 | Max workers | 3 [3] | One carries the load; the rest are so a long review does not sit in front of somebody's analysis board. |
 | Active workers | 0 [0] | Always-on workers are billed around the clock, which is the thing this whole arrangement exists to avoid. |
@@ -200,13 +200,31 @@ the plans are ever reshaped, that is the assumption to revisit.
 
 ## How fast this is
 
-Expect roughly **1000–2000 playouts per second** on a 24GB card with the main
-net, against 10–20 on the CPU backend this used to run on. A 200-move game at
-600 visits is 120,000 visits, so on the order of **one to two minutes** rather
-than eight to twelve.
+Measured, finally, on an RTX PRO 6000 Blackwell **MIG 1g.24gb** slice — a
+seventh of a card, which is what the endpoint was actually given. Fourteen
+positions from the analysis board, 19x19, 60 visits each:
 
-**Measure it before believing it.** The number depends on the card, the net and
-whether FP16 checks out, and none of it has been run here.
+| | `elapsed_seconds` |
+|---|---|
+| First query on a fresh container | **26.2s** |
+| Every query after it | **0.02 – 0.34s** |
+| First query 2.5 minutes later | **30.1s** |
+
+The first number is not the search. It is the neural net loading and KataGo's
+FP16 correctness check, which happen lazily at the first evaluation rather than
+at startup — `engine.start()` returns as soon as the engine answers
+`query_version`, and that does not touch the net.
+
+So the cost of a position is **either about 30 seconds or about a tenth of one**,
+with nothing in between, and which one you get is decided entirely by whether a
+worker is still awake. That is what makes the idle timeout the most important
+setting on the endpoint, and the third row above is what a short one looks like:
+two and a half minutes of a player thinking, and the next click pays the full
+cold start again.
+
+At 0.03–0.34s for 60 visits, a 200-move review at 600 visits should be **one to
+three minutes**, against the eight to twelve the CPU backend took. Not yet
+measured — no review has run end to end.
 
 A review is still a queued job with a notification. Two minutes is not a button
 you hold a page open for, and the cold start alone can exceed the search.
