@@ -1,0 +1,29 @@
+{
+  "kind": "analyze",
+  "query_id": "live-01JAKESREQUESTID0000000",
+  "moves": [
+    {
+      "color": "W",
+      "loc": "G3"
+    },
+    {
+      "color": "B",
+      "loc": "pass"
+    }
+  ],
+  "board_x_size": 9,
+  "board_y_size": 9,
+  "komi": 6.5,
+  "rules": "japanese",
+  "initial_stones": [
+    {
+      "color": "B",
+      "loc": "G7"
+    },
+    {
+      "color": "B",
+      "loc": "C3"
+    }
+  ],
+  "max_visits": 400
+}

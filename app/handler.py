@@ -124,13 +124,13 @@ async def analyse(current: Runtime, body: AnalyzeIn) -> dict[str, Any]:
     return await current.analyst.analyse(
         PositionRequest(
             query_id=body.query_id,
-            moves=[(m.color, m.loc) for m in body.moves],
+            moves=[m.as_pair() for m in body.moves],
             board_x_size=body.board_x_size,
             board_y_size=body.board_y_size,
             komi=body.komi,
             rules=body.rules,
             max_visits=body.max_visits,
-            initial_stones=[(s.color, s.loc) for s in body.initial_stones] or None,
+            initial_stones=[s.as_pair() for s in body.initial_stones] or None,
             include_ownership=body.include_ownership,
         )
     )
@@ -140,12 +140,12 @@ async def review(current: Runtime, body: ReviewIn) -> dict[str, Any]:
     job = await current.reviewer.run(
         ReviewRequest(
             review_id=body.review_id,
-            moves=[(m.color, m.loc) for m in body.moves],
+            moves=[m.as_pair() for m in body.moves],
             board_x_size=body.board_x_size,
             board_y_size=body.board_y_size,
             komi=body.komi,
             rules=body.rules,
-            initial_stones=[(s.color, s.loc) for s in body.initial_stones] or None,
+            initial_stones=[s.as_pair() for s in body.initial_stones] or None,
             max_visits=body.max_visits or current.settings.default_visits,
             student_rank=body.student_rank,
             student_color=body.student_color,
