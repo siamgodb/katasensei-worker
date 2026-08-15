@@ -34,7 +34,7 @@ from typing import Any
 import httpx
 
 from .analysis import Analyst, PositionRequest
-from .callbacks import LaravelCallback
+from .callbacks import LaravelCallback, proof
 from .config import Settings
 from .engine import KataGoEngine
 from .query import ReviewRequest
@@ -182,6 +182,10 @@ async def ping(*, warm: bool = False) -> dict[str, Any]:
         # cannot be made, the whole review is GPU time spent on an answer that
         # goes in the bin — and the worker only finds out at the end.
         "laravel": await _reachable(laravel_url),
+        # Reaching Laravel is not the same as being let in. A signing key that
+        # does not match the one over there fails the same expensive way, one
+        # step later.
+        "callback_proof": proof(secret) if (secret := os.environ.get("CALLBACK_SECRET", "")) else None,
     }
 
     if warm:

@@ -63,6 +63,19 @@ async def test_the_fingerprint_changes_when_the_engine_config_changes(tmp_path, 
     assert fingerprint() != before
 
 
+async def test_the_callback_proof_is_the_value_laravel_computes(monkeypatch):
+    """The other half is in PingKatagoTest, asserting the same literal.
+
+    Both sides HMAC the same public constant with their own copy of the signing
+    key, and compare. Equal means the keys are equal. Written out rather than
+    recomputed here, because a test that recomputes the thing it is testing
+    would agree with any implementation, including a wrong one.
+    """
+    from app.callbacks import proof
+
+    assert proof("shared-secret") == "68e47251fc22b68a"
+
+
 async def test_it_never_reports_the_value_of_a_secret(monkeypatch):
     """This report travels back through RunPod's API and into whatever logs it
     passes on the way. One of these is the callback signing key."""

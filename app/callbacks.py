@@ -40,6 +40,25 @@ def sign(secret: str, timestamp: str, body: bytes) -> str:
     ).hexdigest()
 
 
+PROBE = b"katasensei-ping"
+"""A fixed, public string. Only the key used to sign it is secret."""
+
+
+def proof(secret: str) -> str:
+    """Something both ends can compute and neither has to send the secret for.
+
+    The last silent way a review can be lost. The worker reaches Laravel, runs
+    the game, produces every report — and the callback is refused because the
+    two copies of the signing key do not match. Nothing about that is visible
+    until the reports fail to arrive, by which time the card has been paid for.
+
+    An HMAC over a constant, truncated: equal on both sides means the keys are
+    equal, and the value carries nothing an attacker cannot already compute
+    from any real callback they observe.
+    """
+    return hmac.new(secret.encode(), PROBE, hashlib.sha256).hexdigest()[:16]
+
+
 class LaravelCallback:
     def __init__(self, base_url: str, secret: str, *, timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
